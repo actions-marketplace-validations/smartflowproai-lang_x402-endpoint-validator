@@ -1,0 +1,35 @@
+# Basic x402 validator — single endpoint on push
+#
+# Drop this in .github/workflows/x402-validate.yml
+# It runs on every push, validates one endpoint, fails the build
+# if anything regresses (manifest drift, 402 body shape, p95 budget).
+
+name: x402 validate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: validate x402 endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check x402 conformance
+        id: x402
+        uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: 'https://api.yourdomain.com/v1/data'
+          threshold-p95: '1000'
+          fail-on: 'any'
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Endpoints checked: ${{ steps.x402.outputs.endpoints-checked }}"
+          echo "Failures: ${{ steps.x402.outputs.failures }}"
+          echo "Status: ${{ steps.x402.outputs.pass-fail }}"

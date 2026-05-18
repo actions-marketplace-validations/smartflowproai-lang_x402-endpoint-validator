@@ -1,0 +1,62 @@
+name: 'x402 Endpoint Validator'
+description: 'Validate x402 endpoint compliance in CI: reachability, /.well-known/x402 manifest, 402 body conformance, response time, and payment-required behavior.'
+author: 'SmartFlow'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  endpoints:
+    description: |
+      Either a JSON array of endpoint URLs (inline), a path to a YAML/JSON
+      config file relative to the workspace, or a single URL. Examples:
+        endpoints: 'https://api.example.com/data'
+        endpoints: '["https://a.com/x", "https://b.com/y"]'
+        endpoints: '.github/x402-endpoints.yml'
+    required: true
+  threshold-p95:
+    description: 'P95 response-time threshold in milliseconds (failure above).'
+    required: false
+    default: '1000'
+  tier:
+    description: 'Tier: free (public-repo defaults) or pro (private repos, webhooks, trend tracking, custom thresholds).'
+    required: false
+    default: 'free'
+  pro-license-key:
+    description: 'Required when tier=pro. Issued at https://smartflowproai.com/atlas.'
+    required: false
+    default: ''
+  webhook-url:
+    description: 'Slack or Teams webhook URL for per-run notifications. Pro tier only.'
+    required: false
+    default: ''
+  report-path:
+    description: 'Path inside the workspace where the JSON report is written.'
+    required: false
+    default: 'x402-validator-report.json'
+  fail-on:
+    description: 'When to set action status to fail: "any" (any check fails), "critical" (only manifest/402 issues), or "never".'
+    required: false
+    default: 'any'
+
+outputs:
+  report-path:
+    description: 'Absolute path to the JSON validation report inside the runner.'
+  pass-fail:
+    description: 'String "pass" if all endpoints meet thresholds, otherwise "fail".'
+  endpoints-checked:
+    description: 'Integer count of endpoints validated.'
+  failures:
+    description: 'Integer count of endpoints with at least one failed check.'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.endpoints }}
+    - ${{ inputs.threshold-p95 }}
+    - ${{ inputs.tier }}
+    - ${{ inputs.pro-license-key }}
+    - ${{ inputs.webhook-url }}
+    - ${{ inputs.report-path }}
+    - ${{ inputs.fail-on }}

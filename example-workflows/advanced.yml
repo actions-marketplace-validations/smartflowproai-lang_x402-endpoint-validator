@@ -1,0 +1,81 @@
+# Advanced x402 validator — config file + conditional PR comment
+#
+# Reads endpoints from .github/x402-endpoints.yml, runs against custom
+# threshold, posts a PR comment listing the first 5 failures if anything
+# regresses, uploads the JSON report as an artifact for history.
+#
+# Requires: pull-requests:write permission for the bot.
+
+name: x402 validate (advanced)
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'p95 threshold in ms'
+        required: false
+        default: '750'
+
+jobs:
+  validate:
+    name: validate x402 endpoints
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run validator
+        id: x402
+        uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: '.github/x402-endpoints.yml'
+          threshold-p95: ${{ github.event.inputs.threshold || '750' }}
+          fail-on: 'critical'
+          report-path: 'x402-report.json'
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x402-report-${{ github.run_number }}
+          path: x402-report.json
+          retention-days: 30
+
+      - name: Comment on PR if failures
+        if: github.event_name == 'pull_request' && steps.x402.outputs.pass-fail == 'fail'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('x402-report.json', 'utf8'));
+            const failures = report.findings.filter(f => f.severity === 'critical' || f.severity === 'warning');
+            const lines = [
+              `## x402 validator: ${{ steps.x402.outputs.failures }} endpoint(s) failed`,
+              '',
+              `Checked **${{ steps.x402.outputs.endpoints-checked }}** endpoints. First findings:`,
+              '',
+              ...failures.slice(0, 5).map(f =>
+                `- **${f.severity}** \`${f.endpoint}\` — ${f.message}`
+              ),
+              '',
+              `Full report in workflow artifacts.`
+            ];
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: lines.join('\n')
+            });
+
+      - name: Fail step if critical
+        if: steps.x402.outputs.pass-fail == 'fail'
+        run: |
+          echo "::error::x402 validator reported ${{ steps.x402.outputs.failures }} failures"
+          exit 1

@@ -1,0 +1,75 @@
+# Matrix x402 validator — parallel validation of N endpoints
+#
+# Uses GitHub matrix strategy to fan out one job per endpoint.
+# Each endpoint shows up as its own check in the PR UI, so when one
+# regresses you see which one without parsing JSON.
+#
+# Runs every 6 hours on cron + on every push to main + on manual dispatch.
+
+name: x402 validate (matrix)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: validate ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - label: decision
+            url: https://api.yourdomain.com/v1/decision
+            threshold: '800'
+          - label: quality
+            url: https://api.yourdomain.com/v1/quality
+            threshold: '1000'
+          - label: signals
+            url: https://api.yourdomain.com/v1/signals
+            threshold: '500'
+          - label: snapshot
+            url: https://api.yourdomain.com/v1/snapshot
+            threshold: '1500'
+          - label: catalog
+            url: https://api.yourdomain.com/v1/catalog
+            threshold: '1200'
+
+    steps:
+      - name: Validate ${{ matrix.label }}
+        id: x402
+        uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: ${{ matrix.url }}
+          threshold-p95: ${{ matrix.threshold }}
+          fail-on: 'any'
+          report-path: 'x402-${{ matrix.label }}.json'
+
+      - name: Upload per-endpoint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x402-${{ matrix.label }}-${{ github.run_number }}
+          path: 'x402-${{ matrix.label }}.json'
+          retention-days: 14
+
+  summary:
+    name: aggregate matrix summary
+    needs: validate
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo overall status
+        run: |
+          if [ "${{ needs.validate.result }}" == "success" ]; then
+            echo "::notice::all endpoints passed"
+          else
+            echo "::error::one or more endpoints failed — see individual matrix jobs"
+            exit 1
+          fi

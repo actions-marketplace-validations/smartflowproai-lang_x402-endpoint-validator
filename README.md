@@ -1,0 +1,260 @@
+# x402 Endpoint Validator
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![GitHub Action](https://img.shields.io/badge/GitHub_Action-v1-2088FF?logo=githubactions&logoColor=white)](https://github.com/marketplace/actions/x402-endpoint-validator)
+[![Maintained 2026](https://img.shields.io/badge/Maintained-2026-brightgreen)](https://github.com/smartflowproai-lang)
+[![x402 compatible](https://img.shields.io/badge/x402-compatible-purple)](https://smartflowproai.com)
+
+A CI-native validator for x402 endpoints. Drops into any GitHub workflow, hits your endpoint with a real probe, parses the `402 Payment Required` body against the x402 spec, and fails the build when the manifest drifts, the response budget breaks, or the well-known shape stops conforming.
+
+If you ship x402 endpoints (paid APIs that quote a price in the `402` body and accept micropayments), this Action is the regression guard you've been writing by hand. Stop paste-curling probes into PR comments. Wire one job, watch the matrix, sleep at night.
+
+---
+
+## Quick start
+
+```yaml
+name: x402 validate
+on: [push, pull_request]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: 'https://api.yourdomain.com/v1/data'
+          threshold-p95: '1000'
+          fail-on: 'any'
+```
+
+That's it. Push, watch the check, get a JSON report committed to the run artifacts.
+
+---
+
+## Inputs
+
+| Name | Required | Default | Description |
+|---|---|---|---|
+| `endpoints` | yes | — | Single URL, inline JSON array (`'["https://a/x","https://b/y"]'`), or a workspace-relative path to a YAML/JSON config file. |
+| `threshold-p95` | no | `1000` | P95 response time in milliseconds. Any endpoint above this fails the latency check. |
+| `tier` | no | `free` | `free` for public repos. `pro` unlocks webhooks, trend tracking, custom thresholds, private-repo support. |
+| `pro-license-key` | no | `''` | Required when `tier=pro`. Issued at smartflowproai.com/atlas. |
+| `webhook-url` | no | `''` | Slack or Teams webhook for per-run notifications. Pro tier only. |
+| `report-path` | no | `x402-validator-report.json` | Where the JSON report lands inside the workspace. Upload it as an artifact if you want history. |
+| `fail-on` | no | `any` | `any` = fail on any check failure. `critical` = fail only on manifest/402 conformance issues. `never` = report-only, never fails the workflow. |
+
+---
+
+## Outputs
+
+| Name | Description |
+|---|---|
+| `report-path` | Absolute path to the JSON report inside the runner. Wire to `actions/upload-artifact` for history. |
+| `pass-fail` | String `pass` if all endpoints clear thresholds, otherwise `fail`. Use in conditionals. |
+| `endpoints-checked` | Integer count of endpoints validated this run. |
+| `failures` | Integer count of endpoints with at least one failed check. Drive PR comments off this. |
+
+---
+
+## What gets checked
+
+Each endpoint goes through five layers:
+
+1. **Reachability** — DNS resolves, TLS handshake completes, server responds.
+2. **`/.well-known/x402` manifest** — discoverable, parses as JSON, advertises the same endpoint paths you claim.
+3. **402 body conformance** — `paymentRequirements` array present, `scheme` recognized (`exact` first-class), `network` declared, `maxAmountRequired` parseable, `asset` and `payTo` populated, `resource` echoes the original URL.
+4. **Response time** — p50/p95/p99 against your declared budget. Fail above `threshold-p95`.
+5. **Payment-required behavior** — the endpoint actually returns `402` for unauthenticated probes (no silent `200` with empty body, no `401`, no `403`).
+
+Findings land in the JSON report with severity (`critical`, `warning`, `info`), endpoint URL, and a one-line remediation hint.
+
+---
+
+## Usage examples
+
+### Basic — validate one endpoint on push
+
+```yaml
+name: x402 validate
+on: [push]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: 'https://api.yourdomain.com/v1/data'
+```
+
+### Advanced — config file, custom threshold, PR comment on failure
+
+```yaml
+name: x402 validate
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: x402
+        uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: '.github/x402-endpoints.yml'
+          threshold-p95: '750'
+          fail-on: 'critical'
+          report-path: 'x402-report.json'
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x402-report
+          path: x402-report.json
+
+      - name: Comment on PR if failures
+        if: steps.x402.outputs.pass-fail == 'fail'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('x402-report.json', 'utf8'));
+            const body = [
+              '## x402 validator: ${{ steps.x402.outputs.failures }} failures',
+              '',
+              'See full report in workflow artifacts.',
+              '',
+              report.findings.slice(0, 5).map(f => `- **${f.severity}** \`${f.endpoint}\`: ${f.message}`).join('\n')
+            ].join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+```
+
+Companion config file `.github/x402-endpoints.yml`:
+
+```yaml
+endpoints:
+  - url: https://api.yourdomain.com/v1/decision
+    expected_amount: '0.005'
+    expected_token: USDC
+    network: base
+  - url: https://api.yourdomain.com/v1/quality
+    expected_amount: '0.01'
+    expected_token: USDC
+    network: base
+```
+
+### Matrix — validate N endpoints in parallel
+
+```yaml
+name: x402 validate (matrix)
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every six hours
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        endpoint:
+          - https://api.yourdomain.com/v1/decision
+          - https://api.yourdomain.com/v1/quality
+          - https://api.yourdomain.com/v1/signals
+          - https://api.yourdomain.com/v1/snapshot
+    steps:
+      - uses: smartflowproai-lang/x402-endpoint-validator@v1
+        with:
+          endpoints: ${{ matrix.endpoint }}
+          threshold-p95: '1000'
+          fail-on: 'any'
+```
+
+Matrix mode gives you per-endpoint check rows in the GitHub UI, so when one endpoint regresses you see exactly which one without parsing JSON.
+
+---
+
+## Why x402?
+
+x402 is the HTTP-native micropayments protocol formalized as a Linux Foundation standard in 2025. It revives the long-dormant `402 Payment Required` status code and gives it a real semantic: the server quotes a price in the body, the client (often an AI agent, sometimes a human) settles, the server returns the resource. No API keys, no signup flows, no Stripe webhook plumbing. Just a `402`, a settlement, and a `200`.
+
+The model matters because the consumers of paid APIs are quietly stopping being humans. Agents probe, evaluate, transact, and move on. They don't fill out signup forms. They don't store keys. They read the `402`, decide if the price is worth it, pay, and consume. That's the entire flow, and it scales to millions of micro-transactions in a way that subscription APIs never could.
+
+The trade-off is that x402 endpoints are fragile in subtle ways. Drop a field from the `402` body and 80% of agent clients will silently skip your endpoint instead of erroring loudly. Bump your p95 past the agent's budget and they'll route around you. Forget to keep `/.well-known/x402` in sync after a path rename and discovery breaks for everyone. None of these show up in your normal HTTP monitoring — they're spec-conformance bugs that only matter to clients that read the spec.
+
+This Action is the conformance test. It speaks the spec, probes like a real agent, and tells you when you've drifted. Wire it into CI once and your `402` body stops rotting silently between deploys.
+
+---
+
+## Tiers
+
+**Free** — public-repo defaults. All five validation layers. Single-endpoint or matrix. JSON report. Use it forever, no key required.
+
+**Pro** ($29/mo, billed in USDC on Base) — private repos, Slack/Teams webhooks, trend tracking across runs, custom per-endpoint thresholds, scheduled monitor mode (validator runs without your repo, pings webhook on regression). Get a key at [smartflowproai.com/atlas](https://smartflowproai.com/atlas).
+
+You never need Pro for normal CI. Pro exists because a handful of teams asked for monitor mode and webhook routing and I wasn't going to ship those into the free tier and have them rot unmaintained.
+
+---
+
+## Maintainer
+
+Built and maintained by **Tom Smart** ([@TomSmart_ai](https://twitter.com/TomSmart_ai)).
+
+- **Site:** [smartflowproai.com](https://smartflowproai.com)
+- **Mapper API:** [smartflowproai.com/catalog](https://smartflowproai.com/catalog) — live index of x402 endpoints across Base + Ethereum.
+- **Substack:** [smartflowproai.substack.com](https://smartflowproai.substack.com) — weekly x402 telemetry and methodology notes.
+- **GitHub:** [github.com/smartflowproai-lang](https://github.com/smartflowproai-lang)
+
+If you ship x402 endpoints, ping me on X. I keep a running list of endpoints that pass conformance and feature them in the weekly snapshot.
+
+---
+
+## Community + contributing
+
+- **Issues:** [github.com/smartflowproai-lang/x402-endpoint-validator/issues](https://github.com/smartflowproai-lang/x402-endpoint-validator/issues)
+- **Discord:** drop into the SmartFlow channel via [smartflowproai.com/discord](https://smartflowproai.com/discord) if you want async support
+- **PRs welcome:** see `CONTRIBUTING.md` for the test harness setup. New scheme support (beyond `exact`) is the top contribution area right now.
+
+If you find a real-world x402 endpoint that the validator gets wrong, open an issue with the URL and the response body — those bug reports are the most useful thing you can send.
+
+---
+
+## FAQ
+
+**Does this Action transmit my endpoint URLs anywhere?**
+No. It runs inside your GitHub runner, hits your endpoints, and writes the report locally. Pro tier adds an opt-in webhook send (you control the URL).
+
+**Does it actually pay the endpoint?**
+No. It performs the unauthenticated probe (the one that triggers `402`) and walks the response. No settlement happens. Your endpoint's price stays untouched.
+
+**Does it support schemes other than `exact`?**
+`exact` is first-class. `upto` is parsed but warning-level. Other schemes pass-through with `info` severity. PRs welcome to expand.
+
+**Will it support Solana / non-EVM networks?**
+EVM is shipped. Solana is on the roadmap once the x402 Solana settlement primitive stabilizes. Track issue #1.
+
+**Why Docker?**
+So the validator dependency tree (Python + httpx + jsonschema) lives in the image, not in your repo. Pinning is on me.
+
+---
+
+## License
+
+MIT © 2026 Tom Smart. See `LICENSE`.
+
+---
+
+*Built on the x402 protocol (Linux Foundation, 2025). Not affiliated with Coinbase, CDP, or the x402 Foundation — independent maintainer, open-source tooling.*
