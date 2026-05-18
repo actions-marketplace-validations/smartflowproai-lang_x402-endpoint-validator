@@ -1,5 +1,5 @@
 name: 'x402 Endpoint Validator'
-description: 'Validate x402 endpoint compliance in CI: reachability, /.well-known/x402 manifest, 402 body conformance, response time, and payment-required behavior.'
+description: 'Validate x402 endpoint compliance: reachability, manifest, 402 body, response time, payment-required behavior.'
 author: 'SmartFlow'
 branding:
   icon: 'shield'
