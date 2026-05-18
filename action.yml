@@ -38,6 +38,10 @@ inputs:
     description: 'When to set action status to fail: "any" (any check fails), "critical" (only manifest/402 issues), or "never".'
     required: false
     default: 'any'
+  api-key:
+    description: 'SmartFlow Mapper API key (optional, unlocks enhanced features: wash detection, reputation history, operator farm flags). Get yours at https://hypersub.xyz/s/smartflow-scorecard'
+    required: false
+    default: ''
 
 outputs:
   report-path:
@@ -52,6 +56,8 @@ outputs:
 runs:
   using: 'docker'
   image: 'Dockerfile'
+  env:
+    INPUT_API_KEY: ${{ inputs.api-key }}
   args:
     - ${{ inputs.endpoints }}
     - ${{ inputs.threshold-p95 }}

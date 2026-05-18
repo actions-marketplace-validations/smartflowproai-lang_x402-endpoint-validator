@@ -309,7 +309,29 @@ def check_p95(url: str, threshold_ms: int) -> dict[str, Any]:
     }
 
 
-def validate_endpoint(url: str, threshold_ms: int) -> dict[str, Any]:
+def enhanced_check(url: str, api_key: str) -> dict[str, Any]:
+    """Query Mapper API for paid-tier intel (wash flag, reputation, history)."""
+    try:
+        resp = requests.get(
+            f"https://api.smartflowproai.com/v1/endpoints/{url}",
+            headers={"X-API-Key": api_key},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "reputation_score": data.get("reputation_score"),
+                "wash_flag": data.get("wash_flag"),
+                "facilitator_mediated": data.get("is_facilitator_mediated"),
+                "on_chain_volume_30d": data.get("on_chain_volume_usdc_30d"),
+                "ok": True,
+            }
+        return {"ok": False, "error": f"api_status_{resp.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def validate_endpoint(url: str, threshold_ms: int, api_key: str = "") -> dict[str, Any]:
     log(f"validating {url}")
     reach = check_reachability(url)
     manifest = check_manifest(url)
@@ -322,7 +344,7 @@ def validate_endpoint(url: str, threshold_ms: int) -> dict[str, Any]:
         perf["passed"],
         body.get("payment_required_passed", False),
     ))
-    return {
+    result = {
         "url": url,
         "passed": endpoint_passed,
         "checks": {
@@ -337,6 +359,31 @@ def validate_endpoint(url: str, threshold_ms: int) -> dict[str, Any]:
             },
         },
     }
+    if api_key:
+        enhanced = enhanced_check(url, api_key)
+        result["enhanced"] = enhanced
+        if enhanced.get("ok"):
+            log(
+                f"  enhanced: reputation={enhanced.get('reputation_score')} "
+                f"wash_flag={enhanced.get('wash_flag')} "
+                f"facilitator_mediated={enhanced.get('facilitator_mediated')} "
+                f"on_chain_volume_30d={enhanced.get('on_chain_volume_30d')}"
+            )
+        else:
+            log(f"  enhanced: lookup failed ({enhanced.get('error')})")
+    return result
+
+
+def print_upsell(api_key_present: bool) -> None:
+    """Lead-funnel CTA appended to every Action run."""
+    if api_key_present:
+        return  # paid user, no need to upsell
+    log("")
+    log("⚡ Free tier scan complete.")
+    log("⚡ Want wash detection, operator farm flags, endpoint reputation history, & cross-endpoint correlation?")
+    log("⚡ Subscribe to Mapper API: https://hypersub.xyz/s/smartflow-scorecard ($15-$4999/mo)")
+    log("⚡ Query directly: https://api.smartflowproai.com/v1/endpoints/{url}?key=YOUR_KEY")
+    log("")
 
 
 def maybe_post_webhook(webhook_url: str, report: dict[str, Any]) -> None:
@@ -386,6 +433,7 @@ def main() -> int:
     webhook_url = os.environ.get("X402V_WEBHOOK_URL", "")
     report_path = os.environ.get("X402V_REPORT_PATH", "x402-validator-report.json")
     fail_on = (os.environ.get("X402V_FAIL_ON", "any") or "any").lower()
+    api_key = os.environ.get("INPUT_API_KEY", "") or os.environ.get("X402V_API_KEY", "")
 
     if tier == "pro" and not pro_key:
         log("tier=pro requires pro-license-key — falling back to free tier")
@@ -401,9 +449,9 @@ def main() -> int:
         log("no endpoints to validate")
         return 2
 
-    log(f"tier={tier}, threshold_p95_ms={threshold_ms}, endpoints={len(urls)}")
+    log(f"tier={tier}, threshold_p95_ms={threshold_ms}, endpoints={len(urls)}, enhanced={'on' if api_key else 'off'}")
 
-    results = [validate_endpoint(u, threshold_ms) for u in urls]
+    results = [validate_endpoint(u, threshold_ms, api_key) for u in urls]
     failures = sum(1 for r in results if not r["passed"])
     summary = {
         "endpoints_checked": len(results),
@@ -411,8 +459,9 @@ def main() -> int:
         "all_passed": failures == 0,
         "threshold_p95_ms": threshold_ms,
         "tier": tier,
+        "enhanced_enabled": bool(api_key),
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "validator_version": "1.0.0",
+        "validator_version": "1.0.1",
     }
     report = {"summary": summary, "endpoints": results}
 
@@ -425,6 +474,8 @@ def main() -> int:
 
     if tier == "pro":
         maybe_post_webhook(webhook_url, report)
+
+    print_upsell(api_key_present=bool(api_key))
 
     return decide_exit_code(report, fail_on)
 

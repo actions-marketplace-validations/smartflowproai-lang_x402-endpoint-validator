@@ -11,24 +11,41 @@ If you ship x402 endpoints (paid APIs that quote a price in the `402` body and a
 
 ---
 
-## Quick start
+## Free Tier (no key needed)
+
+Out of the box, the Action runs **5 compliance checks**:
+- Reachability — endpoint responds
+- `/.well-known/x402` manifest format
+- 402 response body shape
+- Response time (P95)
+- Payment-required behavior
 
 ```yaml
-name: x402 validate
-on: [push, pull_request]
-
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: smartflowproai-lang/x402-endpoint-validator@v1
-        with:
-          endpoints: 'https://api.yourdomain.com/v1/data'
-          threshold-p95: '1000'
-          fail-on: 'any'
+- uses: smartflowproai-lang/x402-endpoint-validator@v1.0.1
+  with:
+    endpoints: |
+      https://api.example.com
+      https://other.com/api
 ```
 
-That's it. Push, watch the check, get a JSON report committed to the run artifacts.
+## Paid Tier (with `api-key`)
+
+Get an API key from [hypersub.xyz/s/smartflow-scorecard](https://hypersub.xyz/s/smartflow-scorecard) ($15-$4999/mo).
+
+Unlocks **enhanced intel per endpoint**:
+- **Wash detection** — flag operator farms self-routing payments
+- **Reputation score** — 0.0–1.0 based on 60-day behavioral history
+- **Facilitator classification** — CDP-mediated vs P2P vs other
+- **On-chain volume 30d** — USDC throughput tracked from our payments index
+
+```yaml
+- uses: smartflowproai-lang/x402-endpoint-validator@v1.0.1
+  with:
+    endpoints: ${{ github.event.repository.html_url }}
+    api-key: ${{ secrets.SMARTFLOW_KEY }}
+```
+
+Output now includes `reputation_score`, `wash_flag`, `facilitator_mediated`, `on_chain_volume_30d` per endpoint.
 
 ---
 
@@ -203,9 +220,9 @@ This Action is the conformance test. It speaks the spec, probes like a real agen
 
 **Free** — public-repo defaults. All five validation layers. Single-endpoint or matrix. JSON report. Use it forever, no key required.
 
-**Pro** ($29/mo, billed in USDC on Base) — private repos, Slack/Teams webhooks, trend tracking across runs, custom per-endpoint thresholds, scheduled monitor mode (validator runs without your repo, pings webhook on regression). Get a key at [smartflowproai.com/atlas](https://smartflowproai.com/atlas).
+**Paid (Mapper API key)** — pass `api-key` to unlock enhanced per-endpoint intel: wash detection, reputation history, facilitator classification, on-chain 30d volume. Tiers run from Insider ($15/mo) up to Enterprise ($4,999/mo). Subscribe at [hypersub.xyz/s/smartflow-scorecard](https://hypersub.xyz/s/smartflow-scorecard).
 
-You never need Pro for normal CI. Pro exists because a handful of teams asked for monitor mode and webhook routing and I wasn't going to ship those into the free tier and have them rot unmaintained.
+You never need a key for normal CI conformance. The key exists for teams that want the underlying Mapper telemetry surfaced inline with their validation runs.
 
 ---
 
