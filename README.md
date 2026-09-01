@@ -5,7 +5,9 @@
 [![Maintained 2026](https://img.shields.io/badge/Maintained-2026-brightgreen)](https://github.com/smartflowproai-lang)
 [![x402 compatible](https://img.shields.io/badge/x402-compatible-purple)](https://smartflowproai.com)
 
-A CI-native validator for x402 endpoints. Drops into any GitHub workflow, hits your endpoint with a real probe, parses the `402 Payment Required` body against the x402 spec, and fails the build when the manifest drifts, the response budget breaks, or the well-known shape stops conforming.
+A CI-native validator for x402 endpoints. Drops into any GitHub workflow, hits your endpoint with a real probe, reads the `402 Payment Required` quote against the x402 spec, and fails the build when a route stops returning a conformant quote or the response budget breaks.
+
+A `/.well-known/x402` manifest defect is a **host-level finding**, not an endpoint failure: it is reported in `summary.manifest_defect_hosts` and per endpoint as `manifest_defect: true`, but it does not fail the build unless you ask for it with `fail-on: 'manifest'`. One broken manifest is one finding, not one finding per endpoint on the host.
 
 If you ship x402 endpoints (paid APIs that quote a price in the `402` body and accept micropayments), this Action is the regression guard you've been writing by hand. Stop paste-curling probes into PR comments. Wire one job, watch the matrix, sleep at night.
 
@@ -16,7 +18,7 @@ If you ship x402 endpoints (paid APIs that quote a price in the `402` body and a
 Out of the box, the Action runs **5 compliance checks**:
 - Reachability — endpoint responds
 - `/.well-known/x402` manifest format
-- 402 response body shape
+- 402 response conformance
 - Response time (P95)
 - Payment-required behavior
 
@@ -59,7 +61,19 @@ Output now includes `reputation_score`, `wash_flag`, `facilitator_mediated`, `on
 | `pro-license-key` | no | `''` | Required when `tier=pro`. Issued at smartflowproai.com/atlas. |
 | `webhook-url` | no | `''` | Slack or Teams webhook for per-run notifications. Pro tier only. |
 | `report-path` | no | `x402-validator-report.json` | Where the JSON report lands inside the workspace. Upload it as an artifact if you want history. |
-| `fail-on` | no | `any` | `any` = fail on any check failure. `critical` = fail only on manifest/402 conformance issues. `never` = report-only, never fails the workflow. |
+| `fail-on` | no | `any` | `any` = fail on any endpoint that did not pass. `critical` = fail only on 402 payment-conformance defects. `manifest` = fail only on `/.well-known/x402` defects. `never` = report-only, never fails the workflow. Every mode is a subset of `endpoint.passed`. |
+| `probe-method` | no | `auto` | Probe method for the unauthenticated payment-required check: `auto` tries GET then POST; `GET` or `POST` forces one method. |
+| `strict-v2` | no | `false` | Opt into the strict-v2 contract: reproducible v2 verdicts, fresh probe timestamping, raw response archive, and body-only legacy placement as a strict failure. |
+
+### Strict-v2 mode
+
+`strict-v2` is wired as an Action input for the issue #1 strict-v2 contract. The
+mode is designed for reproducible v2-only verdicts: each strict verdict is based
+on a fresh probe, records `probed_at_utc`, archives the raw response used for
+the decision, and treats body-only legacy placement as
+`failure_class=legacy_placement`. See
+`docs/superpowers/specs/2026-07-19-strict-v2-mode-design.md` for the locked
+policy before validator enforcement lands.
 
 ---
 
@@ -78,15 +92,82 @@ Output now includes `reputation_score`, `wash_flag`, `facilitator_mediated`, `on
 
 Each endpoint goes through five layers:
 
-1. **Reachability** — DNS resolves, TLS handshake completes, server responds.
-2. **`/.well-known/x402` manifest** — discoverable, parses as JSON, advertises the same endpoint paths you claim.
-3. **402 body conformance** — `paymentRequirements` array present, `scheme` recognized (`exact` first-class), `network` declared, `maxAmountRequired` parseable, `asset` and `payTo` populated, `resource` echoes the original URL.
+1. **Reachability** — the route answers *something* other than 404/410/5xx to at least one probe method. Liveness is decided by the method that produced the verdict: a `402` from POST proves a POST-only route is alive, so a GET `404` on that same route is not a "dead route".
+2. **`/.well-known/x402` manifest** — discoverable, parses as JSON, advertises the same endpoint paths you claim. Host-level finding (see above), fetched once per host per run.
+3. **402 conformance** — reads the v2 `PAYMENT-REQUIRED` header first, decodes its base64 `PaymentRequired` object, and validates `accepts[]`. Body JSON remains supported as the legacy placement for v1/body-only endpoints. `exact` is first-class, `network` is declared, the amount is parseable, `asset` and `payTo` are populated, and `resource` echoes the original URL when present.
 4. **Response time** — p50/p95/p99 against your declared budget. Fail above `threshold-p95`.
-5. **Payment-required behavior** — the endpoint actually returns `402` for unauthenticated probes (no silent `200` with empty body, no `401`, no `403`).
+5. **Payment-required behavior** — the endpoint actually returns `402` for unauthenticated probes. By default the probe is automatic: try GET, then POST, and record the method that produced the verdict (no silent `200` with empty body, no `401`, no `403`).
 
-Findings land in the JSON report with severity (`critical`, `warning`, `info`), endpoint URL, and a one-line remediation hint.
+Findings land in the JSON report with a `severity` of `pass`, `info`, or `fail`, the endpoint URL, and a one-line remediation hint.
+
+`info` means **there is nothing to convict here** — it never counts as a failure and never launders into a pass:
+
+| `failure_class` | meaning |
+|---|---|
+| `free_route` | you declared this route `expect: free` and it answered without a 402 — documented behaviour, not a defect |
+| `auth_gated` | `accepts: []` plus a recognised auth extension (`sign-in-with-x`, `siwe`, …): an authentication wall, out of payment-conformance scope |
+| `unknown_network` | the `network` namespace is not in the validator's registry (`eip155`, `solana`), so the atomic-amount rule cannot be applied. Unverifiable, not cleared — a merchant cannot switch off the price check by renaming its network |
+
+### Endpoint list format
+
+Entries may be plain URL strings or objects with per-endpoint options:
+
+```yaml
+endpoints:
+  - url: https://api.example.com/v1/paid          # probed GET then POST
+  - url: https://api.example.com/api/place_call
+    probe_method: POST                            # POST-only route
+  - url: https://api.example.com/v1/discovery
+    expect: free                                  # documented free; no 402 expected
+```
+
+Entries that do not parse as URLs — a sentence lifted from your docs, for
+instance — are **rejected, not scanned**, and listed in
+`summary.input_entries_rejected`.
+
+### Strict-v2 contract
+
+When `strict-v2: 'true'` is enforced by the validator, the v2 verdict must come
+from a fresh unauthenticated probe with `probed_at_utc` and an archived
+`raw_response`. Valid body-only responses remain visible as legacy placement,
+but strict mode classifies them as `failure_class=legacy_placement` instead of a
+passing v2 result.
+
+The JSON report keeps the compatibility key `checks.body_conformance`, but the v2 path is header-canonical. That check may include:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `channel` | `header` \| `body` \| `both` | Where the decoded `PaymentRequired` was found. |
+| `probe_method` | `GET` \| `POST` | Method whose response produced the verdict. |
+| `schemes` | array of strings | Schemes observed in the canonical `accepts[]`. |
+| `networks` | array of strings | Networks observed in the canonical `accepts[]`. |
+| `failure_class` | string or null | Stable failure reason such as `v2_header_invalid`, `network_format`, or `l402_www_authenticate`. |
+| `legacy_placement` | boolean | True when a body-only response passed through the legacy/body path. |
+| `channel_mismatch` | boolean | True when header and body both exist but disagree on amount, network, or `payTo`. |
+| `channel_mismatch_fields` | array of strings | The mismatched fields: `amount`, `network`, and/or `payTo`. |
+| `caip2_in_header` | boolean | True when the canonical header includes CAIP-2 network identifiers. |
+
+If a response only offers an L402/Lightning `WWW-Authenticate` challenge and no decodable JSON `PaymentRequired`, it is reported with the separate `l402_www_authenticate` failure class rather than treated as a passing x402 v2 header response.
 
 ---
+
+## Fixture freshness
+
+Committed fixtures are deliberately frozen snapshots — the test suite proves the parser against bytes that never change. Freshness is owned by a daily out-of-repo watch, not by the tests:
+
+- `scripts/corpus_watch.py` runs daily (06:25 UTC). It reads every `tests/fixtures/*.json` on `origin/main` that carries a real live URL — the route list is derived from the corpus, not maintained by hand, so a new fixture is watched the moment it lands on main. Synthetic fixtures (`constructed` cases, `example.test` hosts) are excluded automatically.
+- Per route it issues the same unpaid preflight the fixture was captured with (no payment involved) and compares the live status and `PAYMENT-REQUIRED` challenge byte-for-byte against the stored value. Drift raises an alert; resolved drift produces a dated report in `watch-reports/`.
+- The two Viridis routes additionally run under a per-seller watch (the PR #14 commitment): the seller's `.well-known` index declares which commit, path and sha256 it pins, and that watch recomputes the hash over the pinned bytes and preflights the live endpoint daily.
+
+Capture-time metadata went through three field generations, oldest first:
+
+| field | fixtures | meaning |
+|---|---|---|
+| *(none)* | apinow, hugen, weatherxm, web3identity | capture date lives in the file's git history (`git log --format=%aI -- <path>`) |
+| `capture_date` / `captured_at` | both viridis | date-only, upgraded to a full timestamp mid-capture; **these two files cannot adopt newer fields** — their exact bytes are pinned by the seller's published sha256, so any edit on our side would itself be pin drift |
+| `captured_at_utc` | asterpay ×2, terradeed, stabletravel | full UTC timestamp written at capture time |
+
+stabletravel moved to the third generation on 2026-08-31, re-captured after the first full-corpus watch run flagged a rotated solana-leg `feePayer` — see `watch-reports/2026-08-31-corpus.md`.
 
 ## Usage examples
 
@@ -206,7 +287,7 @@ Matrix mode gives you per-endpoint check rows in the GitHub UI, so when one endp
 
 ## Why x402?
 
-x402 is the HTTP-native micropayments protocol formalized as a Linux Foundation standard in 2025. It revives the long-dormant `402 Payment Required` status code and gives it a real semantic: the server quotes a price in the body, the client (often an AI agent, sometimes a human) settles, the server returns the resource. No API keys, no signup flows, no Stripe webhook plumbing. Just a `402`, a settlement, and a `200`.
+x402 is the HTTP-native micropayments protocol introduced by Coinbase in 2025 and under formal, vendor-neutral Linux Foundation governance since July 2026. It revives the long-dormant `402 Payment Required` status code and gives it a real semantic: the server quotes a price in the body, the client (often an AI agent, sometimes a human) settles, the server returns the resource. No API keys, no signup flows, no Stripe webhook plumbing. Just a `402`, a settlement, and a `200`.
 
 The model matters because the consumers of paid APIs are quietly stopping being humans. Agents probe, evaluate, transact, and move on. They don't fill out signup forms. They don't store keys. They read the `402`, decide if the price is worth it, pay, and consume. That's the entire flow, and it scales to millions of micro-transactions in a way that subscription APIs never could.
 
@@ -258,7 +339,7 @@ No. It runs inside your GitHub runner, hits your endpoints, and writes the repor
 No. It performs the unauthenticated probe (the one that triggers `402`) and walks the response. No settlement happens. Your endpoint's price stays untouched.
 
 **Does it support schemes other than `exact`?**
-`exact` is first-class. `upto` is parsed but warning-level. Other schemes pass-through with `info` severity. PRs welcome to expand.
+`exact` is first-class. Other schemes are not expanded by the header-channel pass and should be treated as report-only/lower-confidence until dedicated validators land. PRs welcome to expand.
 
 **Will it support Solana / non-EVM networks?**
 EVM is shipped. Solana is on the roadmap once the x402 Solana settlement primitive stabilizes. Track issue #1.
@@ -268,10 +349,14 @@ So the validator dependency tree (Python + httpx + jsonschema) lives in the imag
 
 ---
 
+## Contributors
+
+- **Gael Leonardo Chulim Gongora** ([@MSSATANASS](https://github.com/MSSATANASS)) — v2 PAYMENT-REQUIRED header-canonical conformance (#3, #4), strict-v2 mode with the fresh-probe response archive (#1, #5), and the 1,098-endpoint failure triage that shaped the v2 check design. First external contributor to this repo.
+
 ## License
 
 MIT © 2026 Tom Smart. See `LICENSE`.
 
 ---
 
-*Built on the x402 protocol (Linux Foundation, 2025). Not affiliated with Coinbase, CDP, or the x402 Foundation — independent maintainer, open-source tooling.*
+*Built on the x402 protocol (introduced 2025; Linux Foundation governance since July 2026). Not affiliated with Coinbase, CDP, or the x402 Foundation — independent maintainer, open-source tooling.*
