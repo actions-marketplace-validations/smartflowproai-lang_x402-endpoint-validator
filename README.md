@@ -311,14 +311,14 @@ You never need a key for normal CI conformance. The key exists for teams that wa
 
 ## Maintainer
 
-Built and maintained by **Tom Smart** ([@TomSmart_ai](https://twitter.com/TomSmart_ai)).
+Built and maintained by **Tom Smart** ([Substack](https://smartflowproai.substack.com)).
 
 - **Site:** [smartflowproai.com](https://smartflowproai.com)
 - **Mapper API:** [api.smartflowproai.com/docs](https://api.smartflowproai.com/docs) — live index of x402 endpoints across Base + Ethereum.
 - **Substack:** [smartflowproai.substack.com](https://smartflowproai.substack.com) — weekly x402 telemetry and methodology notes.
 - **GitHub:** [github.com/smartflowproai-lang](https://github.com/smartflowproai-lang)
 
-If you ship x402 endpoints, ping me on X. I keep a running list of endpoints that pass conformance and feature them in the weekly snapshot.
+If you ship x402 endpoints, ping me on the CDP Discord (#x402) or by reply on Substack. I keep a running list of endpoints that pass conformance and feature them in the weekly snapshot.
 
 ---
 
